@@ -22,32 +22,36 @@ class AudioExportMixer {
     return this.destination;
   }
 
-  // Play audio blob or URL directly into the MediaRecorder stream destination
-  async playAudioIntoStream(audioUrl) {
-    if (!audioUrl) return;
+  // Decode audio buffer once so it starts with ZERO delay
+  async prepareAudioBuffer(audioUrl) {
+    if (!audioUrl) return null;
     this.init();
-
     try {
       const response = await fetch(audioUrl);
       const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await this.audioCtx.decodeAudioData(arrayBuffer);
+      return await this.audioCtx.decodeAudioData(arrayBuffer);
+    } catch (err) {
+      console.warn('Audio decoding error:', err);
+      return null;
+    }
+  }
 
+  // Play audio buffer directly into the MediaRecorder stream destination
+  playBuffer(audioBuffer) {
+    if (!audioBuffer) return;
+    this.init();
+
+    try {
       const sourceNode = this.audioCtx.createBufferSource();
       sourceNode.buffer = audioBuffer;
 
-      // Connect to MediaRecorder recording stream
       sourceNode.connect(this.destination);
-      // Also connect to speaker so user hears export progress
       sourceNode.connect(this.audioCtx.destination);
 
       sourceNode.start(0);
       this.activeSourceNodes.push(sourceNode);
 
-      return new Promise((resolve) => {
-        sourceNode.onended = () => {
-          resolve();
-        };
-      });
+      return sourceNode;
     } catch (err) {
       console.warn('Audio export stream track error:', err);
     }

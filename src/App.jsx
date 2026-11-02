@@ -216,7 +216,35 @@ export default function App() {
     voiceoverManager.stop();
     audioExportMixer.stopAll();
 
-    // 1. Initialize Combined Video + Audio MediaStream
+    // 1. Reset visual canvas completely to Scene 0, Progress 0, Word 0 BEFORE starting recorder
+    setCurrentSceneIdx(0);
+    currentSceneIdxRef.current = 0;
+    setSceneProgress(0);
+    setSpokenWordIndex(0);
+
+    // 2. Pre-fetch and decode ALL audio tracks BEFORE starting recording so there is ZERO network delay during capture
+    const totalScenes = storyboard.scenes.length;
+    const preloadedAudioBuffers = [];
+
+    for (let i = 0; i < totalScenes; i++) {
+      const scene = storyboard.scenes[i];
+      if (voiceEnabled && scene.voiceover) {
+        try {
+          const audioUrl = await voiceoverManager.generateNeuralAudio(scene.voiceover, selectedVoiceRef.current);
+          const buf = await audioExportMixer.prepareAudioBuffer(audioUrl);
+          preloadedAudioBuffers.push(buf);
+        } catch {
+          preloadedAudioBuffers.push(null);
+        }
+      } else {
+        preloadedAudioBuffers.push(null);
+      }
+    }
+
+    // Allow React 1 frame to paint Scene 0 cleanly onto the canvas
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // 3. Initialize Combined Video + Audio MediaStream
     const canvasStream = canvas.captureStream(30);
     const audioStream = audioExportMixer.getAudioStream();
 
@@ -256,9 +284,8 @@ export default function App() {
 
     mediaRecorder.start();
 
-    // 2. Step through each scene with synchronized voice audio mixed into export stream
-    const totalScenes = storyboard.scenes.length;
-    const playSceneForExport = async (index) => {
+    // 4. Step through each scene with 1:1 acoustic timing synchronization
+    const playSceneForExport = (index) => {
       if (index >= totalScenes) {
         mediaRecorder.stop();
         setCurrentSceneIdx(0);
@@ -272,24 +299,30 @@ export default function App() {
       currentSceneIdxRef.current = index;
       const scene = storyboard.scenes[index];
       const durationMs = getSceneDuration(scene) * 1000;
-      const startT = performance.now();
-      const allWords = (scene.voiceover || '').trim().split(/\s+/);
+      const wordTimings = voiceoverManager.calculateTimings(scene.voiceover || '', 1.05);
 
-      // Fetch voiceover audio url and route into audio export mixer
-      if (voiceEnabled && scene.voiceover) {
-        try {
-          const audioUrl = await voiceoverManager.generateNeuralAudio(scene.voiceover, selectedVoiceRef.current);
-          audioExportMixer.playAudioIntoStream(audioUrl);
-        } catch {
-          // If offline or neural fails, continues smoothly
-        }
+      // Play pre-decoded audio buffer synchronously at time 0 of the scene
+      if (preloadedAudioBuffers[index]) {
+        audioExportMixer.playBuffer(preloadedAudioBuffers[index]);
       }
+
+      const startT = performance.now();
 
       const stepRecord = (now) => {
         const elapsed = now - startT;
         const p = Math.min(1, elapsed / durationMs);
         setSceneProgress(p);
-        setSpokenWordIndex(Math.min(allWords.length - 1, Math.floor(p * allWords.length)));
+
+        // Highlight word in exact millisecond alignment with the pre-calculated acoustic timing
+        let activeIdx = 0;
+        for (let w = 0; w < wordTimings.length; w++) {
+          if (elapsed >= wordTimings[w].startMs) {
+            activeIdx = w;
+          } else {
+            break;
+          }
+        }
+        setSpokenWordIndex(activeIdx);
 
         const overall = ((index + p) / totalScenes) * 100;
         setRecordingProgress(Math.floor(overall));
