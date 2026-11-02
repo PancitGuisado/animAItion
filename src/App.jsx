@@ -9,6 +9,7 @@ import confetti from 'canvas-confetti';
 import { generateAnimationPlan, PRESET_TEMPLATES, VIDEO_TYPES } from './services/geminiService';
 import { audioFx } from './services/audioSynth';
 import { voiceoverManager, AI_VOICES } from './services/voiceoverManager';
+import { audioExportMixer } from './services/audioExportMixer';
 import { VideoCanvas, ASPECT_RATIOS } from './components/VideoCanvas';
 
 function getSceneDuration(scene) {
@@ -213,14 +214,27 @@ export default function App() {
     setIsPlaying(false);
     audioFx.stopBGM();
     voiceoverManager.stop();
+    audioExportMixer.stopAll();
 
-    const stream = canvas.captureStream(30);
-    let mimeType = 'video/webm;codecs=vp9';
+    // 1. Initialize Combined Video + Audio MediaStream
+    const canvasStream = canvas.captureStream(30);
+    const audioStream = audioExportMixer.getAudioStream();
+
+    const combinedTracks = [
+      ...canvasStream.getVideoTracks(),
+      ...audioStream.getAudioTracks()
+    ];
+    const combinedStream = new MediaStream(combinedTracks);
+
+    let mimeType = 'video/webm;codecs=vp9,opus';
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = 'video/webm;codecs=vp8,opus';
+    }
     if (!MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = 'video/webm';
     }
 
-    const mediaRecorder = new MediaRecorder(stream, { mimeType });
+    const mediaRecorder = new MediaRecorder(combinedStream, { mimeType });
     const chunks = [];
 
     mediaRecorder.ondataavailable = (e) => {
@@ -228,7 +242,8 @@ export default function App() {
     };
 
     mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: 'video/webm' });
+      audioExportMixer.stopAll();
+      const blob = new Blob(chunks, { type: mimeType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -241,8 +256,9 @@ export default function App() {
 
     mediaRecorder.start();
 
+    // 2. Step through each scene with synchronized voice audio mixed into export stream
     const totalScenes = storyboard.scenes.length;
-    const playSceneForExport = (index) => {
+    const playSceneForExport = async (index) => {
       if (index >= totalScenes) {
         mediaRecorder.stop();
         setCurrentSceneIdx(0);
@@ -258,6 +274,16 @@ export default function App() {
       const durationMs = getSceneDuration(scene) * 1000;
       const startT = performance.now();
       const allWords = (scene.voiceover || '').trim().split(/\s+/);
+
+      // Fetch voiceover audio url and route into audio export mixer
+      if (voiceEnabled && scene.voiceover) {
+        try {
+          const audioUrl = await voiceoverManager.generateNeuralAudio(scene.voiceover, selectedVoiceRef.current);
+          audioExportMixer.playAudioIntoStream(audioUrl);
+        } catch {
+          // If offline or neural fails, continues smoothly
+        }
+      }
 
       const stepRecord = (now) => {
         const elapsed = now - startT;
